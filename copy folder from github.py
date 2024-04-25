@@ -8,4 +8,4 @@ while mylist[-1]!="":
 mylist.pop()
 link = link.replace(link.split("/")[-1],"")
 for i in mylist:
-    print(link+i)
+    print(command + link+i)
