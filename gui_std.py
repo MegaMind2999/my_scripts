@@ -12,16 +12,27 @@ import urllib3
 import time
 from datetime import datetime
 import sys
+import base64
+import json
+
 from openpyxl.utils import get_column_letter
 from openpyxl.formatting.rule import ColorScaleRule, CellIsRule, FormulaRule
 from openpyxl.styles import PatternFill, Font
 
+# =========================================================
+# CHROME RENDERING IMPORTS
+# =========================================================
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # =========================================================
-# MODERN THEME CONFIGURATION
+# CONFIGURATION
 # =========================================================
-COLOR_BG = "#f8f9fa"
+COLOR_BG = "#f0f0f0"
 COLOR_CARD = "#ffffff"
 COLOR_HEADER = "#1a1d29"
 COLOR_ACCENT = "#6366f1"
@@ -58,58 +69,11 @@ def resource_path(relative_path):
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
 
-class ModernButton(tk.Canvas):
-    def __init__(self, parent, text, command, bg_color, hover_color, **kwargs):
-        super().__init__(parent, highlightthickness=0, **kwargs)
-        self.command = command
-        self.bg_color = bg_color
-        self.hover_color = hover_color
-        self.text = text
-        self.is_enabled = True
-        
-        self.config(bg=parent.cget('bg'))
-        self.bind('<Button-1>', self._on_click)
-        self.bind('<Enter>', self._on_enter)
-        self.bind('<Leave>', self._on_leave)
-        
-        self._draw()
-    
-    def _draw(self):
-        self.delete('all')
-        width = self.winfo_reqwidth() or 200
-        height = self.winfo_reqheight() or 45
-        
-        color = self.hover_color if hasattr(self, '_hovering') and self._hovering else self.bg_color
-        if not self.is_enabled:
-            color = '#d1d5db'
-        
-        self.create_rectangle(0, 0, width, height, fill=color, outline='', tags='bg')
-        self.create_text(width/2, height/2, text=self.text, fill='white', 
-                        font=('Segoe UI', 10, 'bold'), tags='text')
-    
-    def _on_enter(self, e):
-        if self.is_enabled:
-            self._hovering = True
-            self._draw()
-            self.config(cursor='hand2')
-    
-    def _on_leave(self, e):
-        self._hovering = False
-        self._draw()
-        self.config(cursor='')
-    
-    def _on_click(self, e):
-        if self.is_enabled and self.command:
-            self.command()
-    
-    def set_state(self, enabled):
-        self.is_enabled = enabled
-        self._draw()
 
 class TantaScraperApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Student List Manager")
+        self.root.title("Student List Manager - Chrome Portrait")
         
         icon_path = resource_path("nicde.ico")
         try:
@@ -123,6 +87,9 @@ class TantaScraperApp:
         self.current_profile = "Science"
         self.stop_event = threading.Event()
         self.is_batch_running = False
+        
+        self.var_save_excel = tk.BooleanVar(value=True)
+        self.var_save_pdf = tk.BooleanVar(value=False)
         self.var_cond_format = tk.BooleanVar(value=False)
         
         self.session = None
@@ -193,15 +160,7 @@ class TantaScraperApp:
                  fieldbackground=[('readonly', COLOR_CARD)],
                  selectbackground=[('readonly', COLOR_ACCENT)])
 
-    def _create_card(self, parent, **kwargs):
-        card = tk.Frame(parent, bg=COLOR_CARD, **kwargs)
-        card.grid_propagate(False)
-        
-        shadow = tk.Frame(parent, bg=COLOR_SHADOW, height=2)
-        return card, shadow
-
     def _setup_ui(self):
-        # Header with gradient effect
         header_frame = tk.Frame(self.root, bg=COLOR_HEADER, height=80)
         header_frame.pack(fill=tk.X)
         header_frame.pack_propagate(False)
@@ -217,10 +176,9 @@ class TantaScraperApp:
         
         tk.Label(title_frame, text="Student List Manager", bg=COLOR_HEADER, fg="white",
                 font=("Segoe UI", 20, "bold")).pack(anchor='w')
-        tk.Label(title_frame, text="Export student data to Excel with ease", 
+        tk.Label(title_frame, text="Export ro Excel/PDF", 
                 bg=COLOR_HEADER, fg="#9ca3af", font=("Segoe UI", 9)).pack(anchor='w')
         
-        # Profile switcher
         profile_btn_frame = tk.Frame(header_frame, bg=COLOR_HEADER)
         profile_btn_frame.pack(side=tk.RIGHT, padx=20)
         
@@ -234,21 +192,15 @@ class TantaScraperApp:
         )
         self.btn_profile.pack()
         
-        # Scrollable container
         scroll_container = tk.Frame(self.root, bg=COLOR_BG)
         scroll_container.pack(fill=tk.BOTH, expand=True)
         
-        # Canvas and scrollbar
         canvas = tk.Canvas(scroll_container, bg=COLOR_BG, highlightthickness=0)
         scrollbar = ttk.Scrollbar(scroll_container, orient="vertical", command=canvas.yview)
         
-        # Main container inside canvas
         main_container = tk.Frame(canvas, bg=COLOR_BG)
-        
-        # Create window in canvas
         canvas_frame = canvas.create_window((0, 0), window=main_container, anchor="nw")
         
-        # Configure canvas
         def configure_scroll_region(event):
             canvas.configure(scrollregion=canvas.bbox("all"))
         
@@ -258,32 +210,43 @@ class TantaScraperApp:
         main_container.bind("<Configure>", configure_scroll_region)
         canvas.bind("<Configure>", configure_canvas_width)
         
-        # Mouse wheel scrolling
+        # --- MODIFIED: More robust scrolling logic ---
         def on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            # Check which widget is currently under the mouse cursor
+            widget = self.root.winfo_containing(event.x_root, event.y_root)
+            
+            # Walk up the widget tree to see if the cursor is over any Combobox
+            is_over_combobox = False
+            while widget:
+                # The actual dropdown list is a Toplevel window, not a ttk.Combobox
+                # So we check if the widget's class is 'TCombobox' or if it's the popup list
+                if isinstance(widget, ttk.Combobox) or widget.winfo_class() == 'Toplevel':
+                    is_over_combobox = True
+                    break
+                widget = widget.master
+
+            # Only scroll the canvas if the mouse is NOT over a combobox
+            if not is_over_combobox:
+                canvas.yview_scroll(int(-1*(event.delta/120)), "units")
         
-        canvas.bind_all("<MouseWheel>", on_mousewheel)
-        
-        # Pack canvas and scrollbar
+        # Bind the scrolling function to the entire application window
+        self.root.bind("<MouseWheel>", on_mousewheel)
+
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         canvas.configure(yscrollcommand=scrollbar.set)
         
-        # Add padding to main container
-        main_container.pack_configure = lambda **kw: None  # Disable pack_configure
+        main_container.pack_configure = lambda **kw: None
         tk.Frame(main_container, bg=COLOR_BG, height=30).grid(row=0, column=0)
         content_frame = tk.Frame(main_container, bg=COLOR_BG)
         content_frame.grid(row=1, column=0, padx=30, sticky="ew")
         main_container.grid_columnconfigure(0, weight=1)
         
-        # Now use content_frame instead of main_container for the rest
         main_container = content_frame
         
-        # Selection Card
         selection_card = tk.Frame(main_container, bg=COLOR_CARD, relief=tk.FLAT, bd=0)
         selection_card.pack(fill=tk.X, pady=(0, 20))
         
-        # Card header
         card_header = tk.Frame(selection_card, bg=COLOR_ACCENT, height=50)
         card_header.pack(fill=tk.X)
         card_header.pack_propagate(False)
@@ -291,7 +254,6 @@ class TantaScraperApp:
         tk.Label(card_header, text="📋 Selection Criteria", bg=COLOR_ACCENT, fg="white",
                 font=("Segoe UI", 13, "bold")).pack(side=tk.LEFT, padx=20, pady=15)
         
-        # Fields container
         fields_container = tk.Frame(selection_card, bg=COLOR_CARD)
         fields_container.pack(fill=tk.BOTH, padx=25, pady=25)
         
@@ -323,7 +285,6 @@ class TantaScraperApp:
             cb.bind("<<ComboboxSelected>>", lambda e, k=key: self.on_selection(k))
             self.combos[key] = cb
         
-        # Options Card
         options_card = tk.Frame(main_container, bg=COLOR_CARD)
         options_card.pack(fill=tk.X, pady=(0, 20))
         
@@ -334,11 +295,29 @@ class TantaScraperApp:
                 font=("Segoe UI", 12, "bold")).pack(anchor='w', pady=(0, 15))
         
         chk_frame = tk.Frame(options_inner, bg=COLOR_CARD)
-        chk_frame.pack(anchor='w')
+        chk_frame.pack(anchor='w', fill=tk.X)
+
+        self.chk_excel = tk.Checkbutton(
+            chk_frame, text="📄 Save as Excel (.xlsx)", variable=self.var_save_excel,
+            bg=COLOR_CARD, activebackground=COLOR_CARD, font=("Segoe UI", 10),
+            fg=COLOR_TEXT, selectcolor=COLOR_CARD, cursor="hand2"
+        )
+        self.chk_excel.pack(side=tk.LEFT, padx=(0, 30))
+
+        self.chk_pdf = tk.Checkbutton(
+            chk_frame, text="📄 Save as PDF (requires Chrome)", variable=self.var_save_pdf,
+            bg=COLOR_CARD, activebackground=COLOR_CARD, font=("Segoe UI", 10),
+            fg=COLOR_TEXT, selectcolor=COLOR_CARD, cursor="hand2",
+            command=self.on_toggle_pdf
+        )
+        self.chk_pdf.pack(side=tk.LEFT)
+        
+        chk_format_frame = tk.Frame(options_inner, bg=COLOR_CARD)
+        chk_format_frame.pack(anchor='w', fill=tk.X, pady=(10,0))
         
         self.chk_format = tk.Checkbutton(
-            chk_frame,
-            text="🎨 Enable Visual Grades (Color Formatting)",
+            chk_format_frame,
+            text="🎨 Enable Visual Grades (Color Formatting for Excel)",
             variable=self.var_cond_format,
             bg=COLOR_CARD, activebackground=COLOR_CARD,
             font=("Segoe UI", 10), fg=COLOR_TEXT,
@@ -346,14 +325,12 @@ class TantaScraperApp:
         )
         self.chk_format.pack(side=tk.LEFT)
         
-        # Progress indicator
         progress_frame = tk.Frame(options_inner, bg=COLOR_CARD)
         progress_frame.pack(fill=tk.X, pady=(15, 0))
         
         self.progress = ttk.Progressbar(progress_frame, mode='indeterminate', length=300)
         self.progress.pack(fill=tk.X)
         
-        # Action Buttons
         actions_card = tk.Frame(main_container, bg=COLOR_CARD)
         actions_card.pack(fill=tk.X, pady=(0, 20))
         
@@ -390,7 +367,6 @@ class TantaScraperApp:
         )
         self.btn_fetch.pack(side=tk.RIGHT)
         
-        # Log Card
         log_card = tk.Frame(main_container, bg=COLOR_CARD)
         log_card.pack(fill=tk.BOTH, expand=True)
         
@@ -414,10 +390,8 @@ class TantaScraperApp:
                           ("cyan", "#89dceb"), ("warning", "#fab387"), ("batch", "#cba6f7")]:
             self.log_area.tag_config(tag, foreground=color)
         
-        # Bottom spacing
         tk.Frame(main_container.master, bg=COLOR_BG, height=30).grid(row=2, column=0)
         
-        # Status Bar
         status_bar = tk.Frame(self.root, bg=COLOR_HEADER, height=35)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
         status_bar.pack_propagate(False)
@@ -509,10 +483,26 @@ class TantaScraperApp:
                 return
             
             self.log(f"✅ Connected as {self.current_profile}", "info")
-            self.root.after(0, lambda: self.load_step("Year"))
+            
+            self.root.after(0, self.initiate_sequence)
         
         except Exception as e:
             self.log(f"❌ Connection error: {e}", "error")
+            self.toggle_loading(False)
+
+    def initiate_sequence(self):
+        self.log("🚀 Auto-selecting latest year and faculty...", "cyan")
+        try:
+            year_opts = self.extract_options(self.id_map["Year"])[:4]
+            if not year_opts:
+                self.log("❌ Could not find any academic years to select.", "error")
+                self.toggle_loading(False)
+                return
+
+            self.update_combo("Year", year_opts, auto_select_index=0)
+
+        except Exception as e:
+            self.log(f"❌ Auto-selection failed: {e}", "error")
             self.toggle_loading(False)
 
     def get_form_data(self, soup):
@@ -799,9 +789,44 @@ class TantaScraperApp:
             
             students_list, code, headers = self.parse_results(soup)
             
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            
             if students_list:
                 self.log(f"✓ Found {len(students_list)} students", "cyan")
-                self.save_excel(students_list, code, headers, silent=silent_save)
+                
+                if not self.var_save_excel.get() and not self.var_save_pdf.get():
+                    self.log("⚠️ No output format selected. Nothing to save.", "warning")
+                    if not silent_save:
+                        messagebox.showwarning("No Selection", "Please select at least one output format (Excel or PDF) to download.")
+                    return
+
+                excel_path, pdf_path = None, None
+                
+                if self.var_save_excel.get():
+                    excel_path = self.save_excel(students_list, code, headers, timestamp)
+                
+                if self.var_save_pdf.get():
+                    pdf_path = self.save_chrome_pdf(report_resp.text, code, timestamp)
+
+                if not silent_save:
+                    saved_files = []
+                    if excel_path: saved_files.append("Excel")
+                    if pdf_path: saved_files.append("PDF")
+
+                    if not saved_files:
+                        messagebox.showerror("Save Failed", "Could not save any files. Please check the logs for errors.")
+                        return
+
+                    message = f"Saved { ' and '.join(saved_files) } successfully."
+                    file_to_open = excel_path or pdf_path
+                    
+                    if file_to_open:
+                        file_type = "Excel" if excel_path else "PDF"
+                        message += f"\n\nOpen the {file_type} file now?"
+                        if messagebox.askyesno("Success", message):
+                            os.startfile(file_to_open)
+                    else:
+                        messagebox.showinfo("Success", message)
             else:
                 self.log("⚠️ No students found", "warning")
                 if not silent_save:
@@ -926,11 +951,8 @@ class TantaScraperApp:
                                    stopIfTrue=True, fill=orange_text_fill)
             ws.conditional_formatting.add(f"{col_letter}2:{col_letter}1000", text_rule)
 
-    def save_excel(self, student_data, code, headers, silent=False):
+    def save_excel(self, student_data, code, headers, timestamp):
         safe_code = "".join([c for c in code if c.isalnum() or c in (' ', '-', '_')]).strip()
-        
-        # Get current timestamp
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         
         folder_name = "lists"
         if not os.path.exists(folder_name):
@@ -938,7 +960,7 @@ class TantaScraperApp:
                 os.makedirs(folder_name)
             except OSError as e:
                 self.log(f"❌ Error creating folder: {e}", "error")
-                return
+                return None
         
         filename = f"{safe_code}_{timestamp}.xlsx"
         file_path = os.path.join(folder_name, filename)
@@ -997,24 +1019,142 @@ class TantaScraperApp:
                 if self.var_cond_format.get():
                     self.apply_conditional_formatting(ws, headers)
             
-            self.log(f"✅ Saved: {filename}", "info")
-            
-            if not silent:
-                full_path = os.path.abspath(file_path)
-                ask_open = messagebox.askyesno(
-                    "Success",
-                    f"File saved successfully:\n{filename}\n\nOpen now?"
-                )
-                if ask_open:
-                    os.startfile(full_path)
+            self.log(f"✅ Excel Saved: {filename}", "info")
+            return os.path.abspath(file_path)
         
         except PermissionError:
             self.log(f"❌ File is open: {filename}", "error")
-            if not silent:
-                messagebox.showerror("Permission Error", 
-                    f"The file '{filename}' is currently open.\n\nPlease close it and try again.")
+            messagebox.showerror("Permission Error", 
+                f"The file '{filename}' is currently open.\n\nPlease close it and try again.")
+            return None
         except Exception as e:
             self.log(f"❌ Excel error: {e}", "error")
+            return None
+
+    # =========================================================
+    # CHROME PDF GENERATION & VALIDATION
+    # =========================================================
+
+    def on_toggle_pdf(self):
+        if self.var_save_pdf.get():
+            self.toggle_loading(True)
+            threading.Thread(target=self._check_chrome_thread, daemon=True).start()
+
+    def _check_chrome_thread(self):
+        is_chrome_ok = self.check_chrome_installation()
+        def update_ui():
+            self.toggle_loading(False)
+            if not is_chrome_ok:
+                self.var_save_pdf.set(False)
+                messagebox.showerror(
+                    "Chrome Not Found",
+                    "Could not find a valid Google Chrome installation or its driver.\n\n"
+                    "Please install Google Chrome to use the PDF export feature."
+                )
+        self.root.after(0, update_ui)
+
+    def check_chrome_installation(self):
+        self.log("🔍 Verifying Chrome installation...", "cyan")
+        try:
+            chrome_options = Options()
+            chrome_options.add_argument("--headless")
+            chrome_options.add_argument("--disable-gpu")
+            chrome_options.add_argument("--log-level=3")
+            
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            driver.quit()
+            
+            self.log("✅ Chrome check successful.", "info")
+            return True
+        except Exception as e:
+            self.log(f"❌ Chrome check failed. Error: {e}", "error")
+            return False
+
+    def save_chrome_pdf(self, html_content, code, timestamp):
+        debug_mode = False
+
+        folder_name = "lists"
+        if not os.path.exists(folder_name):
+            try:
+                os.makedirs(folder_name)
+            except OSError:
+                pass
+            
+        safe_code = "".join([c for c in code if c.isalnum() or c in (' ', '-', '_')]).strip()
+        filename = f"{safe_code}_{timestamp}.pdf"
+        file_path = os.path.join(folder_name, filename)
+        
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+            if soup.head:
+                soup.head.insert(0, soup.new_tag("base", href="https://tdb.tanta.edu.eg/student_results/"))
+            
+            for img in soup.find_all('img'):
+                src = img.get('src')
+                if not src: continue
+                if not src.startswith("http"):
+                    src = "https://tdb.tanta.edu.eg" + src if src.startswith("/") else src  
+                try:
+                    img_resp = self.session.get(src, headers={'Referer': REPORT_URL}, stream=True, timeout=10, verify=False)
+                    if img_resp.status_code == 200:
+                        encoded_string = base64.b64encode(img_resp.content).decode("utf-8")
+                        ct = img_resp.headers.get('Content-Type', 'image/jpeg')
+                        img['src'] = f"data:{ct};base64,{encoded_string}"
+                except Exception: pass
+
+            for table in soup.find_all('table', {'border': '1'}):
+                table['class'] = table.get('class', []) + ['student-grade-table']
+                for attr in ['style', 'border', 'cellspacing', 'cellpadding']:
+                    if table.has_attr(attr): del table[attr]
+
+            style = soup.new_tag('style')
+            style.string = """
+                @page { size: A4 portrait; margin: 0.5cm; }
+                body { font-family: sans-serif; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+                table.student-grade-table { width: 100% !important; border-collapse: collapse !important; border-spacing: 0 !important; margin-top: 5px !important; }
+                table.student-grade-table td, table.student-grade-table th { box-shadow: inset 0 0 0 0.5pt #000000 !important; border: none !important; padding: 3px !important; text-align: center; }
+                table:not(.student-grade-table), table:not(.student-grade-table) td { border: none !important; }
+            """
+            if soup.head: soup.head.append(style)
+            else: soup.body.insert(0, style)
+            final_html = str(soup)
+            
+        except Exception as e:
+            self.log(f"⚠️ HTML Prep failed: {e}", "error")
+            final_html = html_content
+
+        temp_html_path = os.path.abspath(f"temp_{timestamp}.html")
+        try:
+            with open(temp_html_path, "w", encoding="utf-8") as f:
+                f.write(final_html)
+                
+            chrome_options = Options()
+            if not debug_mode: chrome_options.add_argument("--headless")
+            chrome_options.add_argument("--disable-gpu"); chrome_options.add_argument("--no-sandbox"); chrome_options.add_argument("--log-level=3")
+            
+            driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+            driver.execute_cdp_cmd("Emulation.setEmulatedMedia", {"media": "screen"})
+            driver.get(f"file:///{temp_html_path}")
+            time.sleep(1)
+            
+            print_options = {"landscape": False, "displayHeaderFooter": False, "printBackground": True, "preferCSSPageSize": False, "scale": 0.88, "paperWidth": 8.27, "paperHeight": 11.69}
+            result = driver.execute_cdp_cmd("Page.printToPDF", print_options)
+            
+            with open(file_path, "wb") as f:
+                f.write(base64.b64decode(result['data']))
+                
+            self.log(f"✅ PDF Saved: {filename}", "info")
+            driver.quit()
+            return os.path.abspath(file_path)
+            
+        except Exception as e:
+            self.log(f"❌ Chrome Print Failed: {e}", "error")
+            return None
+        finally:
+            if not debug_mode and os.path.exists(temp_html_path):
+                try: os.remove(temp_html_path)
+                except: pass
 
 if __name__ == "__main__":
     root = tk.Tk()
