@@ -14,7 +14,7 @@ def run_command(command, file_to_scan=None):
         if file_to_scan and os.path.exists(file_to_scan):
             subprocess.run(["termux-media-scan", file_to_scan], capture_output=True)
     except subprocess.CalledProcessError:
-        print(f"\n[!] Error: Download failed. TikTok might be blocking the request.")
+        print(f"\n[!] Error: Download failed. Check your internet or run: d u")
 
 def cleanup_temp_files(folder, keep_lyrics=False):
     extensions = ['*.webp', '*.jpg', '*.png', '*.jpeg', '*.part', '*.ytdl']
@@ -37,23 +37,36 @@ def main():
     if not parsed_args.args: return
 
     first_arg = parsed_args.args[0].lower()
+    
+    # Handle Update Command
     if first_arg == 'u':
         print("[*] Updating engine...")
         subprocess.run([sys.executable, "-m", "pip", "install", "-U", "yt-dlp"])
         return
 
+    # --- SMART MODE DETECTION ---
     is_music = False
+    url = ""
+
     if first_arg == 'm' and len(parsed_args.args) > 1:
         is_music = True
         url = parsed_args.args[1]
+    elif first_arg == 'v' and len(parsed_args.args) > 1:
+        is_music = False
+        url = parsed_args.args[1]
     else:
+        # Default Auto-detection logic
         url = parsed_args.args[0]
+        if "music.youtube.com" in url:
+            print("[*] YouTube Music detected. Switching to Music Mode...")
+            is_music = True
+        else:
+            is_music = False
 
     target_folder = "/sdcard/Download/"
     os.makedirs(target_folder, exist_ok=True)
 
-    # --- BASE COMMAND ---
-    # Added a modern User-Agent to prevent bot detection and impersonation warnings
+    # Base Command
     cmd = [
         "yt-dlp", "--no-mtime", "--force-overwrites",
         "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
@@ -66,7 +79,7 @@ def main():
 
     if is_music:
         bitrate = "320" if parsed_args.quality == "high" else "96"
-        print(f"[*] Music Mode: {bitrate}k MP3")
+        print(f"[*] Mode: MP3 Music ({bitrate}k)")
         cmd += [
             "-x", "--audio-format", "mp3", "--audio-quality", bitrate,
             "--embed-thumbnail", "--add-metadata", "--embed-metadata",
@@ -76,12 +89,12 @@ def main():
         ]
         filename_format = "%(title).50s.mp3"
     else:
+        print("[*] Mode: Video")
         filename_format = "%(title).50s.%(ext)s"
 
     output_path = os.path.join(target_folder, parsed_args.output if parsed_args.output else filename_format)
     cmd += ["-o", output_path]
 
-    # --- TIKTOK NO-WATERMARK LOGIC ---
     if parsed_args.list_formats:
         run_command(["yt-dlp", "-F", url])
         return
@@ -91,12 +104,10 @@ def main():
     elif not is_music:
         if "tiktok.com" in url:
             print("[*] TikTok: Targeting NO-WATERMARK stream...")
-            # We avoid 'worst' here. 'bestvideo+bestaudio' or just 'best'
-            # usually fetches the raw API source without the watermark overlay.
-            cmd += ["-f", "bestvideo+bestaudio/best"]
+            cmd += ["-f", "bestvideo+bestaudio/best"] 
         elif any(x in url for x in ["facebook.com", "fb.watch", "instagram.com", "twitter.com", "x.com"]):
             cmd += ["-f", "worst"]
-        elif "youtube.com" in url or "youtu.be" in url or "googlevideo" in url:
+        elif "youtube.com" in url or "googlevideo.com" in url:
             cmd += ["-f", "134+139/bestvideo[height<=360]+bestaudio/best"]
         else:
             cmd += ["-f", "best"]
