@@ -210,26 +210,18 @@ class TantaScraperApp:
         main_container.bind("<Configure>", configure_scroll_region)
         canvas.bind("<Configure>", configure_canvas_width)
         
-        # --- MODIFIED: More robust scrolling logic ---
         def on_mousewheel(event):
-            # Check which widget is currently under the mouse cursor
             widget = self.root.winfo_containing(event.x_root, event.y_root)
-            
-            # Walk up the widget tree to see if the cursor is over any Combobox
             is_over_combobox = False
             while widget:
-                # The actual dropdown list is a Toplevel window, not a ttk.Combobox
-                # So we check if the widget's class is 'TCombobox' or if it's the popup list
                 if isinstance(widget, ttk.Combobox) or widget.winfo_class() == 'Toplevel':
                     is_over_combobox = True
                     break
                 widget = widget.master
 
-            # Only scroll the canvas if the mouse is NOT over a combobox
             if not is_over_combobox:
                 canvas.yview_scroll(int(-1*(event.delta/120)), "units")
         
-        # Bind the scrolling function to the entire application window
         self.root.bind("<MouseWheel>", on_mousewheel)
 
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -1035,6 +1027,57 @@ class TantaScraperApp:
     # CHROME PDF GENERATION & VALIDATION
     # =========================================================
 
+    def load_cached_chrome_path(self):
+        """Checks for a saved config file in the lists folder."""
+        try:
+            config_path = os.path.join("lists", "chrome_config.json")
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    data = json.load(f)
+                    # Check if 'ready' is explicitly True
+                    if data.get('ready') is True:
+                        path = data.get('chrome_path')
+                        # Ensure the path on disk actually still exists
+                        if path and os.path.exists(path):
+                            return path
+        except:
+            pass
+        return None
+
+    def save_chrome_config(self, path):
+        """Saves the verified Chrome path to lists/chrome_config.json."""
+        try:
+            folder = "lists"
+            if not os.path.exists(folder):
+                os.makedirs(folder)
+            
+            config_path = os.path.join(folder, "chrome_config.json")
+            with open(config_path, 'w') as f:
+                json.dump({"chrome_path": path, "ready": True}, f)
+            self.log("💾 Config saved for future runs", "info")
+        except Exception as e:
+            self.log(f"⚠️ Could not save config: {e}", "warning")
+
+    def find_local_chrome_path(self):
+        """Attempts to find chrome.exe in common Windows locations."""
+        
+        # 1. Check Config File first
+        cached = self.load_cached_chrome_path()
+        if cached: return cached
+
+        # 2. Check Standard Paths
+        possible_paths = [
+            os.path.join(os.environ.get('ProgramFiles', 'C:\\Program Files'), 'Google', 'Chrome', 'Application', 'chrome.exe'),
+            os.path.join(os.environ.get('ProgramFiles(x86)', 'C:\\Program Files (x86)'), 'Google', 'Chrome', 'Application', 'chrome.exe'),
+            os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Google', 'Chrome', 'Application', 'chrome.exe'),
+            os.path.expanduser(r"~\AppData\Local\Google\Chrome\Application\chrome.exe")
+        ]
+        
+        for path in possible_paths:
+            if path and os.path.exists(path):
+                return path
+        return None
+
     def on_toggle_pdf(self):
         if self.var_save_pdf.get():
             self.toggle_loading(True)
@@ -1054,6 +1097,14 @@ class TantaScraperApp:
         self.root.after(0, update_ui)
 
     def check_chrome_installation(self):
+        # --- FAST PATH: Trust the config file if it exists and is valid ---
+        cached_path = self.load_cached_chrome_path()
+        if cached_path:
+             self.log("⚡ Chrome verified from config.", "info")
+             return True
+        # ------------------------------------------------------------------
+
+        # --- SLOW PATH: Run full Selenium check ---
         self.log("🔍 Verifying Chrome installation...", "cyan")
         try:
             chrome_options = Options()
@@ -1061,9 +1112,20 @@ class TantaScraperApp:
             chrome_options.add_argument("--disable-gpu")
             chrome_options.add_argument("--log-level=3")
             
+            custom_path = self.find_local_chrome_path()
+            if custom_path:
+                self.log(f"📍 Found Chrome at: {custom_path}", "info")
+                chrome_options.binary_location = custom_path
+            else:
+                self.log("⚠️ Could not auto-detect chrome.exe path, trying default...", "warning")
+
             service = Service(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=chrome_options)
             driver.quit()
+            
+            # Save config if successful and we have a path
+            if custom_path:
+                self.save_chrome_config(custom_path)
             
             self.log("✅ Chrome check successful.", "info")
             return True
@@ -1133,10 +1195,15 @@ class TantaScraperApp:
             if not debug_mode: chrome_options.add_argument("--headless")
             chrome_options.add_argument("--disable-gpu"); chrome_options.add_argument("--no-sandbox"); chrome_options.add_argument("--log-level=3")
             
+            custom_path = self.find_local_chrome_path()
+            if custom_path:
+                chrome_options.binary_location = custom_path
+
             driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
-            driver.execute_cdp_cmd("Emulation.setEmulatedMedia", {"media": "screen"})
-            driver.get(f"file:///{temp_html_path}")
-            time.sleep(1)
+            
+            file_url = f"file:///{temp_html_path.replace(os.sep, '/')}"
+            driver.get(file_url)
+            time.sleep(1.5)
             
             print_options = {"landscape": False, "displayHeaderFooter": False, "printBackground": True, "preferCSSPageSize": False, "scale": 0.88, "paperWidth": 8.27, "paperHeight": 11.69}
             result = driver.execute_cdp_cmd("Page.printToPDF", print_options)
